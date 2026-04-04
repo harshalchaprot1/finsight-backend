@@ -19,14 +19,14 @@ const getMonthlyReport = async (req, res, next) => {
     const conn = await pool.getConnection();
     const [rows] = await conn.query(
       `SELECT 
-        category,
+        category_id,
         SUM(amount) as total_spent,
         COUNT(*) as transaction_count
        FROM Transactions
        WHERE user_id = ? 
-       AND MONTH(date) = ? 
-       AND YEAR(date) = ?
-       GROUP BY category
+       AND MONTH(transaction_date) = ? 
+       AND YEAR(transaction_date) = ?
+       GROUP BY category_id
        ORDER BY total_spent DESC`,
       [user_id, reportMonth, reportYear]
     );
@@ -67,13 +67,13 @@ const getAnnualReport = async (req, res, next) => {
     const conn = await pool.getConnection();
     const [rows] = await conn.query(
       `SELECT 
-        category,
+        category_id,
         SUM(amount) as total_spent,
         COUNT(*) as transaction_count
        FROM Transactions
        WHERE user_id = ? 
-       AND YEAR(date) = ?
-       GROUP BY category
+       AND YEAR(transaction_date) = ?
+       GROUP BY category_id
        ORDER BY total_spent DESC`,
       [user_id, reportYear]
     );
@@ -113,13 +113,13 @@ const getMonthlySummary = async (req, res, next) => {
     const conn = await pool.getConnection();
     const [rows] = await conn.query(
       `SELECT 
-        MONTH(date) as month,
+        MONTH(transaction_date) as month,
         SUM(amount) as total_spent,
         COUNT(*) as transaction_count
        FROM Transactions
        WHERE user_id = ? 
-       AND YEAR(date) = ?
-       GROUP BY MONTH(date)
+       AND YEAR(transaction_date) = ?
+       GROUP BY MONTH(transaction_date)
        ORDER BY month ASC`,
       [user_id, reportYear]
     );
@@ -162,15 +162,20 @@ const getBudgetVsActual = async (req, res, next) => {
 
     // Get budgets
     const [budgets] = await conn.query(
-      `SELECT category, limit_amount FROM Budgets WHERE user_id = ? AND (month = ? OR month IS NULL)`,
-      [user_id, reportMonth]
+      `SELECT category_id, amount FROM Budgets
+       WHERE user_id = ?
+       AND (
+         MONTH(start_date) = ? OR MONTH(end_date) = ? OR
+         (start_date IS NULL AND end_date IS NULL)
+       )`,
+      [user_id, reportMonth, reportMonth]
     );
 
     // Get actual spending
     const [spending] = await conn.query(
-      `SELECT category, SUM(amount) as total_spent FROM Transactions
-       WHERE user_id = ? AND MONTH(date) = ? AND YEAR(date) = ?
-       GROUP BY category`,
+      `SELECT category_id, SUM(amount) as total_spent FROM Transactions
+       WHERE user_id = ? AND MONTH(transaction_date) = ? AND YEAR(transaction_date) = ?
+       GROUP BY category_id`,
       [user_id, reportMonth, reportYear]
     );
 
@@ -178,14 +183,14 @@ const getBudgetVsActual = async (req, res, next) => {
 
     // Combine data
     const comparison = budgets.map(budget => {
-      const spent = spending.find(s => s.category === budget.category);
+      const spent = spending.find(s => s.category_id === budget.category_id);
       const actualSpent = spent ? parseFloat(spent.total_spent) : 0;
-      const budgetLimit = parseFloat(budget.limit_amount);
+      const budgetLimit = parseFloat(budget.amount);
       const remaining = budgetLimit - actualSpent;
       const percentageUsed = ((actualSpent / budgetLimit) * 100).toFixed(2);
 
       return {
-        category: budget.category,
+        category_id: budget.category_id,
         budget_limit: budgetLimit,
         actual_spent: actualSpent,
         remaining: remaining,

@@ -1,15 +1,20 @@
+require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
+const bcrypt = require('bcryptjs');
 const pool = require('./db');
 const errorHandler = require('./middleware/errorHandler');
+const { serializePhoneNosForDb } = require('./utils/phoneNos');
 
 // Import routes
 const transactionsRoutes = require('./routes/transactions');
 const budgetsRoutes = require('./routes/budgets');
 const reportsRoutes = require('./routes/reports');
+const authRoutes = require('./routes/auth');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
+const STORE_PLAINTEXT_PASSWORD = process.env.STORE_PLAINTEXT_PASSWORD === 'true';
 
 // ============================================
 // MIDDLEWARE
@@ -90,10 +95,14 @@ app.post('/users', async (req, res) => {
   const { name, email, password } = req.body;
 
   try {
+    const passwordToStore = password
+      ? (STORE_PLAINTEXT_PASSWORD ? password : await bcrypt.hash(password, 10))
+      : null;
+
     const conn = await pool.getConnection();
     const [result] = await conn.query(
       'INSERT INTO Users (name, email, password) VALUES (?, ?, ?)',
-      [name, email, password]
+      [name, email, passwordToStore]
     );
     conn.release();
 
@@ -110,7 +119,7 @@ app.post('/users', async (req, res) => {
 
 app.put('/users/:id', async (req, res) => {
   const { id } = req.params;
-  const { name, email, password } = req.body;
+  const { name, email, password, phone_nos } = req.body;
 
   try {
     const fields = [];
@@ -118,7 +127,18 @@ app.put('/users/:id', async (req, res) => {
 
     if (name) { fields.push('name = ?'); params.push(name); }
     if (email) { fields.push('email = ?'); params.push(email); }
-    if (password) { fields.push('password = ?'); params.push(password); }
+    if (password) {
+      const passwordToStore = STORE_PLAINTEXT_PASSWORD
+        ? password
+        : await bcrypt.hash(password, 10);
+      fields.push('password = ?');
+      params.push(passwordToStore);
+    }
+    if (phone_nos !== undefined) {
+      const serializedPhoneNos = await serializePhoneNosForDb(phone_nos);
+      fields.push('phone_nos = ?');
+      params.push(serializedPhoneNos);
+    }
 
     if (!fields.length) {
       return res.status(400).json({ success: false, message: 'No fields provided to update' });
@@ -152,8 +172,18 @@ app.patch('/users/:id', async (req, res) => {
 
     if (name !== undefined) { fields.push('name = ?'); params.push(name); }
     if (email !== undefined) { fields.push('email = ?'); params.push(email); }
-    if (password !== undefined) { fields.push('password = ?'); params.push(password); }
-    if (phone_nos !== undefined) { fields.push('phone_nos = ?'); params.push(phone_nos); }
+    if (password !== undefined) {
+      const passwordToStore = STORE_PLAINTEXT_PASSWORD
+        ? password
+        : await bcrypt.hash(password, 10);
+      fields.push('password = ?');
+      params.push(passwordToStore);
+    }
+    if (phone_nos !== undefined) {
+      const serializedPhoneNos = await serializePhoneNosForDb(phone_nos);
+      fields.push('phone_nos = ?');
+      params.push(serializedPhoneNos);
+    }
 
     if (!fields.length) {
       return res.status(400).json({ success: false, message: 'No fields provided to update' });
@@ -198,6 +228,7 @@ app.delete('/users/:id', async (req, res) => {
 app.use('/transactions', transactionsRoutes);
 app.use('/budgets', budgetsRoutes);
 app.use('/reports', reportsRoutes);
+app.use('/auth', authRoutes);
 
 // Health check endpoint
 app.get('/health', (req, res) => {
@@ -230,6 +261,8 @@ app.listen(PORT, () => {
   console.log(`📚 API Documentation:`);
   console.log(`   GET  /health - Health check`);
   console.log(`   GET  /users - Get all users`);
+  console.log(`   POST /auth/register - Register new user`);
+  console.log(`   POST /auth/login - Login existing user`);
   console.log(`   GET  /transactions - Get all transactions`);
   console.log(`   GET  /budgets - Get all budgets`);
   console.log(`   GET  /reports/monthly/:user_id - Monthly report`);

@@ -4,7 +4,7 @@ const pool = require('../db');
 const getAllTransactions = async (req, res, next) => {
   try {
     const conn = await pool.getConnection();
-    const [rows] = await conn.query('SELECT * FROM Transactions ORDER BY date DESC');
+    const [rows] = await conn.query('SELECT * FROM Transactions ORDER BY transaction_date DESC, id DESC');
     conn.release();
 
     res.json({
@@ -30,7 +30,7 @@ const getTransactionsByUserId = async (req, res, next) => {
 
     const conn = await pool.getConnection();
     const [rows] = await conn.query(
-      'SELECT * FROM Transactions WHERE user_id = ? ORDER BY date DESC',
+      'SELECT * FROM Transactions WHERE user_id = ? ORDER BY transaction_date DESC, id DESC',
       [userId]
     );
     conn.release();
@@ -79,18 +79,37 @@ const getTransactionById = async (req, res, next) => {
 // ✅ CREATE new transaction
 const createTransaction = async (req, res, next) => {
   try {
-    const { user_id, amount, category, description, date } = req.body;
+    const {
+      user_id,
+      amount,
+      category_id,
+      category,
+      type,
+      note,
+      description,
+      transaction_date,
+      date,
+      brand_id
+    } = req.body;
 
-    if (!user_id || !amount || !category) {
-      const err = new Error('user_id, amount, and category are required');
+    const resolvedCategoryId = category_id ?? category;
+    const resolvedType = type || 'expense';
+    const resolvedNote = note ?? description ?? null;
+    const resolvedTransactionDate = transaction_date || date || new Date();
+    const resolvedBrandId = brand_id || null;
+
+    if (!user_id || !amount || !resolvedCategoryId) {
+      const err = new Error('user_id, amount, and category_id are required');
       err.statusCode = 400;
       throw err;
     }
 
     const conn = await pool.getConnection();
     const [result] = await conn.query(
-      'INSERT INTO Transactions (user_id, amount, category, description, date) VALUES (?, ?, ?, ?, ?)',
-      [user_id, amount, category, description || null, date || new Date()]
+      `INSERT INTO Transactions
+       (user_id, brand_id, category_id, amount, type, note, transaction_date)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      [user_id, resolvedBrandId, resolvedCategoryId, amount, resolvedType, resolvedNote, resolvedTransactionDate]
     );
     conn.release();
 
@@ -100,10 +119,12 @@ const createTransaction = async (req, res, next) => {
       data: {
         id: result.insertId,
         user_id,
+        brand_id: resolvedBrandId,
+        category_id: resolvedCategoryId,
         amount,
-        category,
-        description,
-        date: date || new Date()
+        type: resolvedType,
+        note: resolvedNote,
+        transaction_date: resolvedTransactionDate
       }
     });
   } catch (err) {
@@ -115,7 +136,17 @@ const createTransaction = async (req, res, next) => {
 const updateTransaction = async (req, res, next) => {
   try {
     const { id } = req.params;
-    const { amount, category, description, date } = req.body;
+    const {
+      amount,
+      category_id,
+      category,
+      type,
+      note,
+      description,
+      transaction_date,
+      date,
+      brand_id
+    } = req.body;
 
     if (!id) {
       const err = new Error('Transaction ID is required');
@@ -123,7 +154,14 @@ const updateTransaction = async (req, res, next) => {
       throw err;
     }
 
-    if (!amount && !category && !description && !date) {
+    const hasAmount = amount !== undefined;
+    const hasCategory = category_id !== undefined || category !== undefined;
+    const hasType = type !== undefined;
+    const hasNote = note !== undefined || description !== undefined;
+    const hasDate = transaction_date !== undefined || date !== undefined;
+    const hasBrand = brand_id !== undefined;
+
+    if (!hasAmount && !hasCategory && !hasType && !hasNote && !hasDate && !hasBrand) {
       const err = new Error('At least one field is required to update');
       err.statusCode = 400;
       throw err;
@@ -133,24 +171,34 @@ const updateTransaction = async (req, res, next) => {
     const params = [];
     const fields = [];
 
-    if (amount) {
+    if (hasAmount) {
       fields.push('amount = ?');
       params.push(amount);
     }
 
-    if (category) {
-      fields.push('category = ?');
-      params.push(category);
+    if (hasCategory) {
+      fields.push('category_id = ?');
+      params.push(category_id ?? category);
     }
 
-    if (description) {
-      fields.push('description = ?');
-      params.push(description);
+    if (hasType) {
+      fields.push('type = ?');
+      params.push(type);
     }
 
-    if (date) {
-      fields.push('date = ?');
-      params.push(date);
+    if (hasNote) {
+      fields.push('note = ?');
+      params.push(note ?? description);
+    }
+
+    if (hasDate) {
+      fields.push('transaction_date = ?');
+      params.push(transaction_date ?? date);
+    }
+
+    if (hasBrand) {
+      fields.push('brand_id = ?');
+      params.push(brand_id);
     }
 
     query += fields.join(', ');

@@ -1,4 +1,5 @@
 const pool = require('../db');
+const { serializePhoneNosForDb } = require('../utils/phoneNos');
 
 // ✅ GET all users
 const getAllUsers = async (req, res, next) => {
@@ -81,7 +82,7 @@ const createUser = async (req, res, next) => {
 const updateUser = async (req, res, next) => {
   try {
     const { id } = req.params;
-    const { name, email } = req.body;
+    const { name, email, phone_nos } = req.body;
 
     if (!id) {
       const err = new Error('User ID is required');
@@ -89,27 +90,32 @@ const updateUser = async (req, res, next) => {
       throw err;
     }
 
-    if (!name && !email) {
-      const err = new Error('At least one field (name or email) is required to update');
+    if (name === undefined && email === undefined && phone_nos === undefined) {
+      const err = new Error('At least one field (name, email, or phone_nos) is required to update');
       err.statusCode = 400;
       throw err;
     }
 
-    let query = 'UPDATE Users SET ';
+    const fields = [];
     const params = [];
 
-    if (name) {
-      query += 'name = ?';
+    if (name !== undefined) {
+      fields.push('name = ?');
       params.push(name);
     }
 
-    if (email) {
-      if (name) query += ', ';
-      query += 'email = ?';
+    if (email !== undefined) {
+      fields.push('email = ?');
       params.push(email);
     }
 
-    query += ' WHERE id = ?';
+    if (phone_nos !== undefined) {
+      const serializedPhoneNos = await serializePhoneNosForDb(phone_nos);
+      fields.push('phone_nos = ?');
+      params.push(serializedPhoneNos);
+    }
+
+    const query = `UPDATE Users SET ${fields.join(', ')} WHERE id = ?`;
     params.push(id);
 
     const conn = await pool.getConnection();
