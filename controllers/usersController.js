@@ -52,7 +52,7 @@ const getUserById = async (req, res, next) => {
 // ✅ CREATE new user
 const createUser = async (req, res, next) => {
   try {
-    const { name, email } = req.body;
+    const { name, email, phone_nos } = req.body;
 
     if (!name || !email) {
       const err = new Error('Name and email are required');
@@ -60,8 +60,13 @@ const createUser = async (req, res, next) => {
       throw err;
     }
 
+    const serializedPhoneNos = await serializePhoneNosForDb(phone_nos);
+
     const conn = await pool.getConnection();
-    const [result] = await conn.query('INSERT INTO Users (name, email) VALUES (?, ?)', [name, email]);
+    const [result] = await conn.query(
+      'INSERT INTO Users (name, email, phone_nos) VALUES (?, ?, ?)',
+      [name, email, serializedPhoneNos]
+    );
     conn.release();
 
     res.status(201).json({
@@ -70,7 +75,8 @@ const createUser = async (req, res, next) => {
       data: {
         id: result.insertId,
         name,
-        email
+        email,
+        phone_nos: serializedPhoneNos
       }
     });
   } catch (err) {

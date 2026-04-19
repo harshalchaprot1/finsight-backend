@@ -92,17 +92,18 @@ app.get('/users/:id', async (req, res) => {
 });
 
 app.post('/users', async (req, res) => {
-  const { name, email, password } = req.body;
+  const { name, email, password, phone_nos } = req.body;
 
   try {
     const passwordToStore = password
       ? (STORE_PLAINTEXT_PASSWORD ? password : await bcrypt.hash(password, 10))
       : null;
+    const serializedPhoneNos = await serializePhoneNosForDb(phone_nos);
 
     const conn = await pool.getConnection();
     const [result] = await conn.query(
-      'INSERT INTO Users (name, email, password) VALUES (?, ?, ?)',
-      [name, email, passwordToStore]
+      'INSERT INTO Users (name, email, password, phone_nos) VALUES (?, ?, ?, ?)',
+      [name, email, passwordToStore, serializedPhoneNos]
     );
     conn.release();
 
