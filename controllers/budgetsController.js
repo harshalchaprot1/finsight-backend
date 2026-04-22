@@ -96,8 +96,18 @@ const createBudget = async (req, res, next) => {
     const resolvedMonth = month || now.getMonth() + 1;
     const resolvedYear = year || now.getFullYear();
 
-    const resolvedStartDate = start_date || new Date(resolvedYear, resolvedMonth - 1, 1);
-    const resolvedEndDate = end_date || new Date(resolvedYear, resolvedMonth, 0);
+    const formatDateForMySQL = (val) => {
+      if (!val) return null;
+      const d = new Date(val);
+      if (isNaN(d.getTime())) return null;
+      return d.toISOString().slice(0, 19).replace('T', ' ');
+    };
+
+    const parsedStartDate = start_date ? new Date(start_date) : new Date(resolvedYear, resolvedMonth - 1, 1);
+    const parsedEndDate = end_date ? new Date(end_date) : new Date(resolvedYear, resolvedMonth, 0);
+
+    const resolvedStartDate = formatDateForMySQL(parsedStartDate);
+    const resolvedEndDate = formatDateForMySQL(parsedEndDate);
     const resolvedVersion = version ?? 0;
 
     if (!user_id || !resolvedCategoryId || resolvedAmount === undefined) {
@@ -159,6 +169,13 @@ const updateBudget = async (req, res, next) => {
     const hasEndDate = end_date !== undefined;
     const hasVersion = version !== undefined;
 
+    const formatDateForMySQL = (val) => {
+      if (!val) return null;
+      const d = new Date(val);
+      if (isNaN(d.getTime())) return null;
+      return d.toISOString().slice(0, 19).replace('T', ' ');
+    };
+
     if (!hasCategory && !hasAmount && !hasStartDate && !hasEndDate && !hasVersion) {
       const err = new Error('At least one field is required to update');
       err.statusCode = 400;
@@ -181,12 +198,12 @@ const updateBudget = async (req, res, next) => {
 
     if (hasStartDate) {
       fields.push('start_date = ?');
-      params.push(start_date);
+      params.push(formatDateForMySQL(start_date));
     }
 
     if (hasEndDate) {
       fields.push('end_date = ?');
-      params.push(end_date);
+      params.push(formatDateForMySQL(end_date));
     }
 
     if (hasVersion) {

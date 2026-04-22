@@ -1,6 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const {
+  getDashboardSummary,
   getMonthlyReport,
   getAnnualReport,
   getMonthlySummary,
@@ -8,6 +9,12 @@ const {
 } = require('../controllers/reportsController');
 
 // Routes
+router.get('/dashboard/:user_id', getDashboardSummary);
+router.get('/dashboard', getDashboardSummary);
+router.get('/summary/:user_id', getDashboardSummary);
+router.get('/summary', getDashboardSummary);
+router.get('/summary-data/:user_id', getDashboardSummary);
+router.get('/summary-data', getDashboardSummary);
 router.get('/monthly/:user_id', getMonthlyReport);
 router.get('/annual/:user_id', getAnnualReport);
 router.get('/summary/monthly/:user_id', getMonthlySummary);

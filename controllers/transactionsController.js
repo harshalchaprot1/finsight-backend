@@ -92,10 +92,18 @@ const createTransaction = async (req, res, next) => {
       brand_id
     } = req.body;
 
+    const formatDateForMySQL = (val) => {
+      if (!val) return null;
+      const d = new Date(val);
+      if (isNaN(d.getTime())) return null;
+      return d.toISOString().slice(0, 19).replace('T', ' ');
+    };
+
     const resolvedCategoryId = category_id ?? category;
     const resolvedType = type || 'expense';
     const resolvedNote = note ?? description ?? null;
-    const resolvedTransactionDate = transaction_date || date || new Date();
+    const rawDate = transaction_date || date || new Date();
+    const resolvedTransactionDate = formatDateForMySQL(rawDate);
     const resolvedBrandId = brand_id || null;
 
     if (!user_id || !amount || !resolvedCategoryId) {
@@ -161,6 +169,13 @@ const updateTransaction = async (req, res, next) => {
     const hasDate = transaction_date !== undefined || date !== undefined;
     const hasBrand = brand_id !== undefined;
 
+    const formatDateForMySQL = (val) => {
+      if (!val) return null;
+      const d = new Date(val);
+      if (isNaN(d.getTime())) return null;
+      return d.toISOString().slice(0, 19).replace('T', ' ');
+    };
+
     if (!hasAmount && !hasCategory && !hasType && !hasNote && !hasDate && !hasBrand) {
       const err = new Error('At least one field is required to update');
       err.statusCode = 400;
@@ -193,7 +208,7 @@ const updateTransaction = async (req, res, next) => {
 
     if (hasDate) {
       fields.push('transaction_date = ?');
-      params.push(transaction_date ?? date);
+      params.push(formatDateForMySQL(transaction_date ?? date));
     }
 
     if (hasBrand) {
