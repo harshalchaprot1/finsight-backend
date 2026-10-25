@@ -1,5 +1,6 @@
 const express = require('express');
 const router = express.Router();
+const authenticateToken = require('../middleware/auth');
 const {
   getAllBudgets,
   getBudgetsByUserId,
@@ -8,6 +9,9 @@ const {
   updateBudget,
   deleteBudget
 } = require('../controllers/budgetsController');
+
+// All budget operations require valid authentication
+router.use(authenticateToken);
 
 // Routes
 router.get('/', getAllBudgets);

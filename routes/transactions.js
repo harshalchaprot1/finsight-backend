@@ -1,5 +1,6 @@
 const express = require('express');
 const router = express.Router();
+const authenticateToken = require('../middleware/auth');
 const {
   getAllTransactions,
   getTransactionsByUserId,
@@ -8,6 +9,9 @@ const {
   updateTransaction,
   deleteTransaction
 } = require('../controllers/transactionsController');
+
+// All transaction operations require valid authentication
+router.use(authenticateToken);
 
 // Routes
 router.get('/', getAllTransactions);

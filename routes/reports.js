@@ -1,5 +1,6 @@
 const express = require('express');
 const router = express.Router();
+const authenticateToken = require('../middleware/auth');
 const {
   getDashboardSummary,
   getMonthlyReport,
@@ -7,6 +8,9 @@ const {
   getMonthlySummary,
   getBudgetVsActual
 } = require('../controllers/reportsController');
+
+// All reports require valid authentication
+router.use(authenticateToken);
 
 // Routes
 router.get('/dashboard/:user_id', getDashboardSummary);

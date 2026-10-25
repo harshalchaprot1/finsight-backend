@@ -1,53 +1,9 @@
 const pool = require('../db');
-const jwt = require('jsonwebtoken');
 
-const JWT_SECRET = process.env.JWT_SECRET || 'change_this_secret_in_env';
-
-const parseUserId = (value) => {
-  if (value === undefined || value === null || value === '') {
-    return null;
-  }
-
-  const parsed = Number.parseInt(value, 10);
+const parseId = (val) => {
+  if (val === undefined || val === null || val === '') return null;
+  const parsed = Number.parseInt(val, 10);
   return Number.isInteger(parsed) && parsed > 0 ? parsed : null;
-};
-
-const getUserIdFromToken = (req) => {
-  const authHeader = req.headers.authorization || req.headers.Authorization;
-  if (!authHeader || typeof authHeader !== 'string') {
-    return null;
-  }
-
-  const [scheme, token] = authHeader.split(' ');
-  if (!scheme || scheme.toLowerCase() !== 'bearer' || !token) {
-    return null;
-  }
-
-  try {
-    const decoded = jwt.verify(token, JWT_SECRET);
-    return parseUserId(decoded?.id || decoded?.user_id || decoded?.userId);
-  } catch (err) {
-    return null;
-  }
-};
-
-const resolveUserId = (req) => {
-  const fromParams = parseUserId(req.params.user_id || req.params.userId || req.params.id);
-  if (fromParams) {
-    return fromParams;
-  }
-
-  const fromQuery = parseUserId(req.query.user_id || req.query.userId || req.query.id);
-  if (fromQuery) {
-    return fromQuery;
-  }
-
-  const fromBody = parseUserId(req.body?.user_id || req.body?.userId || req.body?.id);
-  if (fromBody) {
-    return fromBody;
-  }
-
-  return getUserIdFromToken(req);
 };
 
 const parsePeriod = (month, year) => {
@@ -66,52 +22,73 @@ const parsePeriod = (month, year) => {
 };
 
 // ✅ GET dashboard summary (income, spending, net, top categories)
+// Dual compatibility: supports Angular ReportsService.getSummary() and dashboard metrics
 const getDashboardSummary = async (req, res, next) => {
   try {
-    const userId = resolveUserId(req);
-    const period = parsePeriod(req.query.month, req.query.year);
+    const userId = req.user.user_id;
 
-    if (!userId) {
-      const err = new Error('User ID is required (path, query, body, or token)');
-      err.statusCode = 400;
-      throw err;
+    // Optional query param override if specified in URL, else if user_id passed in param verify it
+    if (req.params.user_id) {
+      const paramUserId = parseId(req.params.user_id);
+      if (paramUserId && paramUserId !== userId) {
+        const err = new Error('Forbidden: You cannot access financial summary of another user');
+        err.statusCode = 403;
+        throw err;
+      }
     }
 
-    const conn = await pool.getConnection();
+    const period = parsePeriod(req.query.month, req.query.year);
 
-    const [totalsRows] = await conn.query(
-      `SELECT
-         COALESCE(SUM(CASE WHEN LOWER(type) = 'income' THEN amount END), 0) AS total_income,
-         COALESCE(SUM(CASE WHEN LOWER(type) <> 'income' OR type IS NULL THEN amount END), 0) AS total_expense,
-         COUNT(*) AS transaction_count
-       FROM Transactions
-       WHERE user_id = ?
-         AND MONTH(transaction_date) = ?
-         AND YEAR(transaction_date) = ?`,
-      [userId, period.month, period.year]
-    );
+    // 1. Calculate totals for month using PostgreSQL EXTRACT
+    const totalsQuery = `
+      SELECT
+        COALESCE(SUM(CASE WHEN transaction_type IN ('INCOME', 'REFUND') THEN amount ELSE 0 END), 0) AS total_income,
+        COALESCE(SUM(CASE WHEN transaction_type = 'EXPENSE' THEN amount ELSE 0 END), 0) AS total_expense,
+        COUNT(*) AS transaction_count
+      FROM transactions
+      WHERE user_id = $1
+        AND EXTRACT(MONTH FROM transaction_date) = $2
+        AND EXTRACT(YEAR FROM transaction_date) = $3
+    `;
 
-    const [categoryRows] = await conn.query(
-      `SELECT
-         category_id,
-         COALESCE(SUM(amount), 0) AS total_spent,
-         COUNT(*) AS transaction_count
-       FROM Transactions
-       WHERE user_id = ?
-         AND MONTH(transaction_date) = ?
-         AND YEAR(transaction_date) = ?
-         AND (LOWER(type) <> 'income' OR type IS NULL)
-       GROUP BY category_id
-       ORDER BY total_spent DESC
-       LIMIT 5`,
-      [userId, period.month, period.year]
-    );
+    // 2. Calculate top categories by spending for month
+    const categoryQuery = `
+      SELECT
+        t.category_id,
+        COALESCE(c.category_name, 'Uncategorized') AS category_name,
+        COALESCE(SUM(t.amount), 0) AS total_spent,
+        COUNT(*) AS transaction_count
+      FROM transactions t
+      LEFT JOIN categories c ON c.category_id = t.category_id AND c.user_id = t.user_id
+      WHERE t.user_id = $1
+        AND EXTRACT(MONTH FROM t.transaction_date) = $2
+        AND EXTRACT(YEAR FROM t.transaction_date) = $3
+        AND t.transaction_type = 'EXPENSE'
+      GROUP BY t.category_id, c.category_name
+      ORDER BY total_spent DESC
+      LIMIT 5
+    `;
 
-    conn.release();
+    const [totalsResult, categoryResult] = await Promise.all([
+      pool.query(totalsQuery, [userId, period.month, period.year]),
+      pool.query(categoryQuery, [userId, period.month, period.year])
+    ]);
 
-    const totals = totalsRows[0] || { total_income: 0, total_expense: 0, transaction_count: 0 };
-    const totalIncome = Number.parseFloat(totals.total_income) || 0;
-    const totalExpense = Number.parseFloat(totals.total_expense) || 0;
+    const totals = totalsResult.rows[0] || { total_income: 0, total_expense: 0, transaction_count: 0 };
+    const totalIncome = Math.round((Number.parseFloat(totals.total_income) || 0) * 100) / 100;
+    const totalExpense = Math.round((Number.parseFloat(totals.total_expense) || 0) * 100) / 100;
+    const netSavings = Math.round((totalIncome - totalExpense) * 100) / 100;
+    const transactionCount = Number(totals.transaction_count) || 0;
+
+    const topCategories = categoryResult.rows.map((row) => ({
+      category_id: row.category_id ? Number(row.category_id) : null,
+      categoryId: row.category_id ? Number(row.category_id) : null,
+      category_name: row.category_name,
+      total_spent: Math.round((Number.parseFloat(row.total_spent) || 0) * 100) / 100,
+      totalSpent: Math.round((Number.parseFloat(row.total_spent) || 0) * 100) / 100,
+      transaction_count: Number(row.transaction_count) || 0,
+      transactionCount: Number(row.transaction_count) || 0
+    }));
 
     res.json({
       success: true,
@@ -122,13 +99,9 @@ const getDashboardSummary = async (req, res, next) => {
         year: period.year,
         total_income: totalIncome,
         total_expense: totalExpense,
-        net_savings: totalIncome - totalExpense,
-        transaction_count: Number(totals.transaction_count) || 0,
-        top_categories: categoryRows.map((row) => ({
-          category_id: row.category_id,
-          total_spent: Number.parseFloat(row.total_spent) || 0,
-          transaction_count: Number(row.transaction_count) || 0
-        }))
+        net_savings: netSavings,
+        transaction_count: transactionCount,
+        top_categories: topCategories
       },
       summary: {
         userId,
@@ -136,13 +109,10 @@ const getDashboardSummary = async (req, res, next) => {
         year: period.year,
         totalIncome,
         totalExpense,
-        netSavings: totalIncome - totalExpense,
-        transactionCount: Number(totals.transaction_count) || 0,
-        categoryPerformance: categoryRows.map((row) => ({
-          categoryId: row.category_id,
-          totalSpent: Number.parseFloat(row.total_spent) || 0,
-          transactionCount: Number(row.transaction_count) || 0
-        }))
+        netSavings,
+        balance: netSavings,
+        transactionCount,
+        categoryPerformance: topCategories
       }
     });
   } catch (err) {
@@ -153,46 +123,60 @@ const getDashboardSummary = async (req, res, next) => {
 // ✅ GET monthly spending report grouped by category
 const getMonthlyReport = async (req, res, next) => {
   try {
-    const { user_id } = req.params;
-    const { month, year } = req.query;
+    const userId = req.user.user_id;
 
-    if (!user_id) {
-      const err = new Error('User ID is required');
-      err.statusCode = 400;
-      throw err;
+    if (req.params.user_id) {
+      const requestedId = parseId(req.params.user_id);
+      if (requestedId && requestedId !== userId) {
+        const err = new Error('Forbidden: You cannot access reports for another user');
+        err.statusCode = 403;
+        throw err;
+      }
     }
 
-    const currentDate = new Date();
-    const reportMonth = month || currentDate.getMonth() + 1;
-    const reportYear = year || currentDate.getFullYear();
+    const period = parsePeriod(req.query.month, req.query.year);
 
-    const conn = await pool.getConnection();
-    const [rows] = await conn.query(
-      `SELECT 
-        category_id,
-        SUM(amount) as total_spent,
-        COUNT(*) as transaction_count
-       FROM Transactions
-       WHERE user_id = ? 
-       AND MONTH(transaction_date) = ? 
-       AND YEAR(transaction_date) = ?
-       GROUP BY category_id
-       ORDER BY total_spent DESC`,
-      [user_id, reportMonth, reportYear]
-    );
-    conn.release();
+    const query = `
+      SELECT
+        t.category_id,
+        COALESCE(c.category_name, 'Uncategorized') AS category_name,
+        COALESCE(SUM(t.amount), 0) AS total_spent,
+        COUNT(*) AS transaction_count
+      FROM transactions t
+      LEFT JOIN categories c ON c.category_id = t.category_id AND c.user_id = t.user_id
+      WHERE t.user_id = $1
+        AND EXTRACT(MONTH FROM t.transaction_date) = $2
+        AND EXTRACT(YEAR FROM t.transaction_date) = $3
+        AND t.transaction_type = 'EXPENSE'
+      GROUP BY t.category_id, c.category_name
+      ORDER BY total_spent DESC
+    `;
 
-    const totalExpenses = rows.reduce((sum, row) => sum + parseFloat(row.total_spent), 0);
+    const result = await pool.query(query, [userId, period.month, period.year]);
+    const totalExpenses = Math.round(result.rows.reduce((sum, row) => sum + (Number.parseFloat(row.total_spent) || 0), 0) * 100) / 100;
+
+    const byCategory = result.rows.map((row) => {
+      const spent = Math.round((Number.parseFloat(row.total_spent) || 0) * 100) / 100;
+      return {
+        category_id: row.category_id ? Number(row.category_id) : null,
+        categoryId: row.category_id ? Number(row.category_id) : null,
+        category_name: row.category_name,
+        total_spent: spent,
+        totalSpent: spent,
+        transaction_count: Number(row.transaction_count) || 0,
+        transactionCount: Number(row.transaction_count) || 0
+      };
+    });
 
     res.json({
       success: true,
       message: 'Monthly report retrieved successfully',
       data: {
-        user_id,
-        month: reportMonth,
-        year: reportYear,
+        user_id: userId,
+        month: period.month,
+        year: period.year,
         total_expenses: totalExpenses,
-        by_category: rows
+        by_category: byCategory
       }
     });
   } catch (err) {
@@ -203,42 +187,58 @@ const getMonthlyReport = async (req, res, next) => {
 // ✅ GET annual spending report grouped by category
 const getAnnualReport = async (req, res, next) => {
   try {
-    const { user_id } = req.params;
-    const { year } = req.query;
+    const userId = req.user.user_id;
 
-    if (!user_id) {
-      const err = new Error('User ID is required');
-      err.statusCode = 400;
-      throw err;
+    if (req.params.user_id) {
+      const requestedId = parseId(req.params.user_id);
+      if (requestedId && requestedId !== userId) {
+        const err = new Error('Forbidden: You cannot access reports for another user');
+        err.statusCode = 403;
+        throw err;
+      }
     }
 
-    const reportYear = year || new Date().getFullYear();
+    const reportYear = Number.parseInt(req.query.year, 10) || new Date().getFullYear();
 
-    const conn = await pool.getConnection();
-    const [rows] = await conn.query(
-      `SELECT 
-        category_id,
-        SUM(amount) as total_spent,
-        COUNT(*) as transaction_count
-       FROM Transactions
-       WHERE user_id = ? 
-       AND YEAR(transaction_date) = ?
-       GROUP BY category_id
-       ORDER BY total_spent DESC`,
-      [user_id, reportYear]
-    );
-    conn.release();
+    const query = `
+      SELECT
+        t.category_id,
+        COALESCE(c.category_name, 'Uncategorized') AS category_name,
+        COALESCE(SUM(t.amount), 0) AS total_spent,
+        COUNT(*) AS transaction_count
+      FROM transactions t
+      LEFT JOIN categories c ON c.category_id = t.category_id AND c.user_id = t.user_id
+      WHERE t.user_id = $1
+        AND EXTRACT(YEAR FROM t.transaction_date) = $2
+        AND t.transaction_type = 'EXPENSE'
+      GROUP BY t.category_id, c.category_name
+      ORDER BY total_spent DESC
+    `;
 
-    const totalExpenses = rows.reduce((sum, row) => sum + parseFloat(row.total_spent), 0);
+    const result = await pool.query(query, [userId, reportYear]);
+    const totalExpenses = Math.round(result.rows.reduce((sum, row) => sum + (Number.parseFloat(row.total_spent) || 0), 0) * 100) / 100;
+
+    const byCategory = result.rows.map((row) => {
+      const spent = Math.round((Number.parseFloat(row.total_spent) || 0) * 100) / 100;
+      return {
+        category_id: row.category_id ? Number(row.category_id) : null,
+        categoryId: row.category_id ? Number(row.category_id) : null,
+        category_name: row.category_name,
+        total_spent: spent,
+        totalSpent: spent,
+        transaction_count: Number(row.transaction_count) || 0,
+        transactionCount: Number(row.transaction_count) || 0
+      };
+    });
 
     res.json({
       success: true,
       message: 'Annual report retrieved successfully',
       data: {
-        user_id,
+        user_id: userId,
         year: reportYear,
         total_expenses: totalExpenses,
-        by_category: rows
+        by_category: byCategory
       }
     });
   } catch (err) {
@@ -246,45 +246,53 @@ const getAnnualReport = async (req, res, next) => {
   }
 };
 
-// ✅ GET monthly spending by month across all categories
+// ✅ GET monthly spending by month across all categories (for year charts)
 const getMonthlySummary = async (req, res, next) => {
   try {
-    const { user_id } = req.params;
-    const { year } = req.query;
+    const userId = req.user.user_id;
 
-    if (!user_id) {
-      const err = new Error('User ID is required');
-      err.statusCode = 400;
-      throw err;
+    if (req.params.user_id) {
+      const requestedId = parseId(req.params.user_id);
+      if (requestedId && requestedId !== userId) {
+        const err = new Error('Forbidden: You cannot access reports for another user');
+        err.statusCode = 403;
+        throw err;
+      }
     }
 
-    const reportYear = year || new Date().getFullYear();
+    const reportYear = Number.parseInt(req.query.year, 10) || new Date().getFullYear();
 
-    const conn = await pool.getConnection();
-    const [rows] = await conn.query(
-      `SELECT 
-        MONTH(transaction_date) as month,
-        SUM(amount) as total_spent,
-        COUNT(*) as transaction_count
-       FROM Transactions
-       WHERE user_id = ? 
-       AND YEAR(transaction_date) = ?
-       GROUP BY MONTH(transaction_date)
-       ORDER BY month ASC`,
-      [user_id, reportYear]
-    );
-    conn.release();
+    // Query v_monthly_financial_summary directly
+    const query = `
+      SELECT
+        EXTRACT(MONTH FROM month)::INT AS month,
+        COALESCE(total_income, 0) AS total_income,
+        COALESCE(total_expenses, 0) AS total_spent,
+        COALESCE(total_refunds, 0) AS total_refunds,
+        COALESCE(net_cash_flow, 0) AS net_cash_flow
+      FROM v_monthly_financial_summary
+      WHERE user_id = $1
+        AND EXTRACT(YEAR FROM month) = $2
+      ORDER BY month ASC
+    `;
 
-    const totalExpenses = rows.reduce((sum, row) => sum + parseFloat(row.total_spent), 0);
+    const result = await pool.query(query, [userId, reportYear]);
+    const totalAnnualExpenses = Math.round(result.rows.reduce((sum, row) => sum + (Number.parseFloat(row.total_spent) || 0), 0) * 100) / 100;
 
     res.json({
       success: true,
       message: 'Monthly summary retrieved successfully',
       data: {
-        user_id,
+        user_id: userId,
         year: reportYear,
-        total_annual_expenses: totalExpenses,
-        by_month: rows
+        total_annual_expenses: totalAnnualExpenses,
+        by_month: result.rows.map((r) => ({
+          month: Number(r.month),
+          total_income: Math.round((Number.parseFloat(r.total_income) || 0) * 100) / 100,
+          total_spent: Math.round((Number.parseFloat(r.total_spent) || 0) * 100) / 100,
+          total_refunds: Math.round((Number.parseFloat(r.total_refunds) || 0) * 100) / 100,
+          net_cash_flow: Math.round((Number.parseFloat(r.net_cash_flow) || 0) * 100) / 100
+        }))
       }
     });
   } catch (err) {
@@ -292,60 +300,66 @@ const getMonthlySummary = async (req, res, next) => {
   }
 };
 
-// ✅ GET budget vs actual spending
+// ✅ GET budget vs actual spending (using v_budget_status)
 const getBudgetVsActual = async (req, res, next) => {
   try {
-    const { user_id } = req.params;
-    const { month, year } = req.query;
+    const userId = req.user.user_id;
 
-    if (!user_id) {
-      const err = new Error('User ID is required');
-      err.statusCode = 400;
-      throw err;
+    if (req.params.user_id) {
+      const requestedId = parseId(req.params.user_id);
+      if (requestedId && requestedId !== userId) {
+        const err = new Error('Forbidden: You cannot access reports for another user');
+        err.statusCode = 403;
+        throw err;
+      }
     }
 
-    const currentDate = new Date();
-    const reportMonth = month || currentDate.getMonth() + 1;
-    const reportYear = year || currentDate.getFullYear();
+    const period = parsePeriod(req.query.month, req.query.year);
 
-    const conn = await pool.getConnection();
+    const query = `
+      SELECT
+        b.budget_id,
+        b.category_id,
+        c.category_name,
+        b.monthly_limit AS budget_limit,
+        COALESCE(v.actual_spending, 0) AS actual_spent,
+        COALESCE(v.remaining_budget, b.monthly_limit) AS remaining,
+        COALESCE(v.utilization_percentage, 0) AS percentage_used
+      FROM budgets b
+      JOIN categories c ON c.category_id = b.category_id AND c.user_id = b.user_id
+      LEFT JOIN v_budget_status v ON v.budget_id = b.budget_id AND v.user_id = b.user_id
+      WHERE b.user_id = $1
+        AND (
+          (EXTRACT(MONTH FROM b.month_start) = $2 AND EXTRACT(YEAR FROM b.month_start) = $3)
+          OR (b.month_start <= make_date($3::int, $2::int, 1) AND b.month_end >= make_date($3::int, $2::int, 1))
+        )
+      ORDER BY b.monthly_limit DESC
+    `;
 
-    // Get budgets
-    const [budgets] = await conn.query(
-      `SELECT category_id, amount FROM Budgets
-       WHERE user_id = ?
-       AND (
-         MONTH(start_date) = ? OR MONTH(end_date) = ? OR
-         (start_date IS NULL AND end_date IS NULL)
-       )`,
-      [user_id, reportMonth, reportMonth]
-    );
+    const result = await pool.query(query, [userId, period.month, period.year]);
 
-    // Get actual spending
-    const [spending] = await conn.query(
-      `SELECT category_id, SUM(amount) as total_spent FROM Transactions
-       WHERE user_id = ? AND MONTH(transaction_date) = ? AND YEAR(transaction_date) = ?
-       GROUP BY category_id`,
-      [user_id, reportMonth, reportYear]
-    );
+    const comparison = result.rows.map((row) => {
+      const budgetLimit = Math.round((Number.parseFloat(row.budget_limit) || 0) * 100) / 100;
+      const actualSpent = Math.round((Number.parseFloat(row.actual_spent) || 0) * 100) / 100;
+      const remaining = Math.round((Number.parseFloat(row.remaining) || 0) * 100) / 100;
+      const percentageUsed = Math.round((Number.parseFloat(row.percentage_used) || 0) * 100) / 100;
 
-    conn.release();
-
-    // Combine data
-    const comparison = budgets.map(budget => {
-      const spent = spending.find(s => s.category_id === budget.category_id);
-      const actualSpent = spent ? parseFloat(spent.total_spent) : 0;
-      const budgetLimit = parseFloat(budget.amount);
-      const remaining = budgetLimit - actualSpent;
-      const percentageUsed = ((actualSpent / budgetLimit) * 100).toFixed(2);
+      let status = 'on_track';
+      if (percentageUsed >= 100) {
+        status = 'over_budget';
+      } else if (percentageUsed >= 80) {
+        status = 'warning';
+      }
 
       return {
-        category_id: budget.category_id,
+        budget_id: Number(row.budget_id),
+        category_id: Number(row.category_id),
+        category_name: row.category_name,
         budget_limit: budgetLimit,
         actual_spent: actualSpent,
-        remaining: remaining,
+        remaining,
         percentage_used: percentageUsed,
-        status: percentageUsed >= 100 ? 'over_budget' : percentageUsed >= 80 ? 'warning' : 'on_track'
+        status
       };
     });
 
@@ -353,9 +367,9 @@ const getBudgetVsActual = async (req, res, next) => {
       success: true,
       message: 'Budget vs actual report retrieved successfully',
       data: {
-        user_id,
-        month: reportMonth,
-        year: reportYear,
+        user_id: userId,
+        month: period.month,
+        year: period.year,
         comparison
       }
     });

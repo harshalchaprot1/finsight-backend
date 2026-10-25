@@ -1,210 +1,233 @@
+
+require('dotenv').config();
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const pool = require('../db');
-const { serializePhoneNosForDb } = require('../utils/phoneNos');
 
-const JWT_SECRET = process.env.JWT_SECRET || 'change_this_secret_in_env';
-const JWT_EXPIRES_IN = process.env.JWT_EXPIRES_IN || '7d';
-const STORE_PLAINTEXT_PASSWORD = process.env.STORE_PLAINTEXT_PASSWORD === 'true';
+const ALLOWED_PROFILE_TYPES = [
+  'STUDENT',
+  'EMPLOYEE',
+  'FREELANCER',
+  'BUSINESS_OWNER'
+];
 
-const normalizeEmail = (email) => String(email || '').trim().toLowerCase();
-const isValidEmail = (email) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
-const looksLikeBcryptHash = (value) => typeof value === 'string' && /^\$2[aby]\$\d{2}\$/.test(value);
-const parseNumericId = (value) => {
-  if (value === undefined || value === null || value === '') {
-    return null;
-  }
+const normalizeEmail = (email) =>
+  String(email || '').trim().toLowerCase();
 
-  const parsed = Number(value);
-  return Number.isInteger(parsed) && parsed > 0 ? parsed : null;
+const createHttpError = (message, statusCode) => {
+  const err = new Error(message);
+  err.statusCode = statusCode;
+  return err;
 };
 
 const createToken = (user) => {
+  const secret = process.env.JWT_SECRET;
+  if (!secret) {
+    throw new Error('JWT_SECRET is missing from the environment configuration');
+  }
+
+  const expiresIn = process.env.JWT_EXPIRES_IN || '7d';
+
   return jwt.sign(
     {
-      id: user.id,
-      email: user.email,
-      name: user.name
+      id: user.user_id,
+      user_id: user.user_id,
+      username: user.username,
+      email: user.email
     },
-    JWT_SECRET,
-    { expiresIn: JWT_EXPIRES_IN }
+    secret,
+    { expiresIn }
   );
 };
 
+// REGISTER
 const register = async (req, res, next) => {
   try {
-    const { name, email, password, phone_nos } = req.body;
-    const normalizedEmail = normalizeEmail(email);
+    const {
+      username,
+      name,
+      email,
+      password,
+      date_of_birth,
+      profile_type
+    } = req.body;
 
-    if (!name || !email || !password) {
-      const err = new Error('Name, email, and password are required');
-      err.statusCode = 400;
-      throw err;
+    // Accept "name" temporarily for compatibility with the old frontend.
+    const resolvedUsername = String(username ?? name ?? '').trim();
+    const normalizedEmail = normalizeEmail(email);
+    const resolvedProfileType = String(
+      profile_type || 'STUDENT'
+    ).trim().toUpperCase();
+
+    if (!resolvedUsername || !normalizedEmail || !password) {
+      throw createHttpError(
+        'Username, email, and password are required',
+        400
+      );
     }
 
-    if (!isValidEmail(normalizedEmail)) {
-      const err = new Error('Please provide a valid email address');
-      err.statusCode = 400;
-      throw err;
+    if (resolvedUsername.length > 50) {
+      throw createHttpError(
+        'Username must not exceed 50 characters',
+        400
+      );
+    }
+
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalizedEmail)) {
+      throw createHttpError('Please provide a valid email address', 400);
     }
 
     if (password.length < 6) {
-      const err = new Error('Password must be at least 6 characters long');
-      err.statusCode = 400;
-      throw err;
+      throw createHttpError(
+        'Password must be at least 6 characters long',
+        400
+      );
     }
 
-    const conn = await pool.getConnection();
+    if (!ALLOWED_PROFILE_TYPES.includes(resolvedProfileType)) {
+      throw createHttpError('Invalid profile type', 400);
+    }
 
-    const [existingUsers] = await conn.query(
-      'SELECT id FROM Users WHERE LOWER(TRIM(email)) = ? LIMIT 1',
-      [normalizedEmail]
+    const resolvedDateOfBirth = date_of_birth || null;
+
+    if (
+      resolvedDateOfBirth !== null &&
+      (
+        typeof resolvedDateOfBirth !== 'string' ||
+        !/^\d{4}-\d{2}-\d{2}$/.test(resolvedDateOfBirth) ||
+        Number.isNaN(Date.parse(`${resolvedDateOfBirth}T00:00:00Z`)) ||
+        new Date(`${resolvedDateOfBirth}T00:00:00Z`)
+          .toISOString().slice(0, 10) !== resolvedDateOfBirth
+      )
+    ) {
+      throw createHttpError(
+        'Date of birth must be a valid date in YYYY-MM-DD format',
+        400
+      );
+    }
+
+    const existingUser = await pool.query(
+      `SELECT user_id
+       FROM users
+       WHERE LOWER(email) = $1
+          OR LOWER(username) = LOWER($2)
+       LIMIT 1`,
+      [normalizedEmail, resolvedUsername]
     );
-    if (existingUsers.length > 0) {
-      conn.release();
-      return res.status(409).json({
-        success: false,
-        message: 'User with this email already exists'
-      });
-    }
 
-    const passwordToStore = STORE_PLAINTEXT_PASSWORD
-      ? password
-      : await bcrypt.hash(password, 10);
-    const serializedPhoneNos = await serializePhoneNosForDb(phone_nos);
-
-    let result;
-
-    if (serializedPhoneNos !== undefined) {
-      [result] = await conn.query(
-        'INSERT INTO Users (name, email, password, phone_nos) VALUES (?, ?, ?, ?)',
-        [name, normalizedEmail, passwordToStore, serializedPhoneNos]
-      );
-    } else {
-      [result] = await conn.query(
-        'INSERT INTO Users (name, email, password) VALUES (?, ?, ?)',
-        [name, normalizedEmail, passwordToStore]
+    if (existingUser.rows.length > 0) {
+      throw createHttpError(
+        'Email or username is already registered',
+        409
       );
     }
 
-    conn.release();
+    const passwordHash = await bcrypt.hash(password, 12);
 
-    const user = {
-      id: result.insertId,
-      name,
-      email: normalizedEmail,
-      phone_nos: phone_nos ?? null
-    };
+    const result = await pool.query(
+      `INSERT INTO users
+         (username, email, password_hash, date_of_birth, profile_type)
+       VALUES ($1, $2, $3, $4, $5)
+       RETURNING user_id, username, email, date_of_birth,
+                 profile_type, created_at`,
+      [
+        resolvedUsername,
+        normalizedEmail,
+        passwordHash,
+        resolvedDateOfBirth,
+        resolvedProfileType
+      ]
+    );
 
+    const user = result.rows[0];
     const token = createToken(user);
 
-    res.status(201).json({
+    return res.status(201).json({
       success: true,
       message: 'Registration successful',
       data: {
-        user,
+        user: {
+          id: Number(user.user_id),
+          user_id: Number(user.user_id),
+          username: user.username,
+          name: user.username,
+          email: user.email,
+          date_of_birth: user.date_of_birth,
+          profile_type: user.profile_type,
+          created_at: user.created_at
+        },
         token
       }
     });
   } catch (err) {
+    if (err.code === '23505') {
+      err.statusCode = 409;
+      err.message = 'Email or username is already registered';
+    }
+
     next(err);
   }
 };
 
+// LOGIN
 const login = async (req, res, next) => {
   try {
-    const { email, password, user_id, userId, id, identifier } = req.body;
-    const loginIdentifier = email ?? identifier;
-    const normalizedIdentifier = normalizeEmail(loginIdentifier);
-    const numericUserId = parseNumericId(user_id ?? userId ?? id ?? loginIdentifier);
-    const isEmailLogin = Boolean(loginIdentifier) && numericUserId === null;
+    const { email, username, identifier, password } = req.body;
 
-    if ((!loginIdentifier && !numericUserId) || !password) {
-      const err = new Error('Email or user ID and password are required');
-      err.statusCode = 400;
-      throw err;
-    }
+    const loginIdentifier = String(
+      email ?? username ?? identifier ?? ''
+    ).trim();
 
-    if (isEmailLogin && !isValidEmail(normalizedIdentifier)) {
-      const err = new Error('Please provide a valid email address');
-      err.statusCode = 400;
-      throw err;
-    }
-
-    const conn = await pool.getConnection();
-    let users;
-
-    if (numericUserId) {
-      [users] = await conn.query(
-        'SELECT id, name, email, password FROM Users WHERE id = ? LIMIT 1',
-        [numericUserId]
-      );
-    } else {
-      [users] = await conn.query(
-        'SELECT id, name, email, password FROM Users WHERE LOWER(TRIM(email)) = ? LIMIT 1',
-        [normalizedIdentifier]
+    if (!loginIdentifier || !password) {
+      throw createHttpError(
+        'Email/username and password are required',
+        400
       );
     }
 
-    if (!users.length) {
-      conn.release();
-      return res.status(401).json({
-        success: false,
-        message: 'Invalid email or password'
-      });
+    const result = await pool.query(
+      `SELECT user_id, username, email, password_hash,
+              date_of_birth, profile_type
+       FROM users
+       WHERE LOWER(email) = LOWER($1)
+          OR LOWER(username) = LOWER($1)
+       LIMIT 1`,
+      [loginIdentifier]
+    );
+
+    if (result.rows.length === 0) {
+      throw createHttpError('Invalid email/username or password', 401);
     }
 
-    const dbUser = users[0];
+    const user = result.rows[0];
+    const passwordMatches = await bcrypt.compare(
+      password,
+      user.password_hash
+    );
 
-    let isPasswordValid = false;
-
-    if (looksLikeBcryptHash(dbUser.password)) {
-      isPasswordValid = await bcrypt.compare(password, dbUser.password);
-    } else {
-      isPasswordValid = dbUser.password === password;
+    if (!passwordMatches) {
+      throw createHttpError('Invalid email/username or password', 401);
     }
-
-    // Backward compatibility for older plain-text passwords. If it matches,
-    // upgrade it to a hash so future logins are secure.
-    if (!isPasswordValid && dbUser.password === password) {
-      isPasswordValid = true;
-
-      if (!STORE_PLAINTEXT_PASSWORD) {
-        const upgradedHash = await bcrypt.hash(password, 10);
-        await conn.query('UPDATE Users SET password = ? WHERE id = ?', [upgradedHash, dbUser.id]);
-      }
-    }
-
-    conn.release();
-
-    if (!isPasswordValid) {
-      return res.status(401).json({
-        success: false,
-        message: 'Invalid email or password'
-      });
-    }
-
-    const user = {
-      id: dbUser.id,
-      name: dbUser.name,
-      email: dbUser.email
-    };
 
     const token = createToken(user);
 
-    res.status(200).json({
+    return res.status(200).json({
       success: true,
       message: 'Login successful',
       data: {
-        user,
+        user: {
+          id: Number(user.user_id),
+          user_id: Number(user.user_id),
+          username: user.username,
+          name: user.username,
+          email: user.email,
+          date_of_birth: user.date_of_birth,
+          profile_type: user.profile_type
+        },
         token
       }
     });
   } catch (err) {
-    if (err.code === 'ER_DUP_ENTRY') {
-      err.statusCode = 409;
-      err.message = 'User with this email already exists';
-    }
     next(err);
   }
 };
