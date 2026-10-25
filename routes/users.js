@@ -8,9 +8,9 @@ const {
   deleteUser
 } = require('../controllers/usersController');
 
-// Public read endpoints for frontend login identifier resolution
-router.get('/', getAllUsers);
-router.get('/:id', getUserById);
+// Protected read endpoints requiring valid authentication
+router.get('/', authenticateToken, getAllUsers);
+router.get('/:id', authenticateToken, getUserById);
 
 // Protected mutation endpoints requiring valid authentication and user ownership
 router.put('/:id', authenticateToken, updateUser);

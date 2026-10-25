@@ -9,6 +9,9 @@ const budgetsRoutes = require('./routes/budgets');
 const reportsRoutes = require('./routes/reports');
 const authRoutes = require('./routes/auth');
 const usersRoutes = require('./routes/users');
+const accountsRoutes = require('./routes/accounts');
+const categoriesRoutes = require('./routes/categories');
+const paymentMethodsRoutes = require('./routes/paymentMethods');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -27,7 +30,8 @@ app.use(cors({
     if (!origin || allowedOrigins.includes(origin)) {
       return callback(null, true);
     }
-    return callback(null, true); // Fallback allow in local development
+    // Reject any origin not in the explicit allowlist
+    return callback(new Error('Not allowed by CORS policy'));
   },
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
@@ -41,6 +45,9 @@ app.use(express.urlencoded({ extended: true }));
 // ============================================
 app.use('/auth', authRoutes);
 app.use('/users', usersRoutes);
+app.use('/accounts', accountsRoutes);
+app.use('/categories', categoriesRoutes);
+app.use('/payment-methods', paymentMethodsRoutes);
 app.use('/transactions', transactionsRoutes);
 app.use('/budgets', budgetsRoutes);
 app.use('/reports', reportsRoutes);
@@ -49,7 +56,7 @@ app.use('/reports', reportsRoutes);
 app.get('/health', (req, res) => {
   res.json({
     success: true,
-    message: '✅ FinSight backend is running',
+    message: '✓ FinSight backend is running',
     timestamp: new Date().toISOString()
   });
 });
@@ -76,13 +83,20 @@ let server;
 if (require.main === module) {
   server = app.listen(PORT, () => {
     console.log(`🚀 FinSight backend running on http://localhost:${PORT}`);
-    console.log(`📚 API Documentation:`);
+    console.log(`📖 API Documentation:`);
     console.log(`   GET    /health - Health check`);
     console.log(`   POST   /auth/register - Register new user`);
     console.log(`   POST   /auth/login - Login existing user`);
     console.log(`   GET    /users - Get all users (sanitized)`);
     console.log(`   GET    /users/:id - Get user by ID`);
     console.log(`   PUT    /users/:id - Update user profile`);
+    console.log(`   GET    /accounts - Get all accounts for authenticated user`);
+    console.log(`   POST   /accounts - Create account`);
+    console.log(`   GET    /accounts/:id - Get account by ID`);
+    console.log(`   PUT    /accounts/:id - Update account`);
+    console.log(`   DELETE /accounts/:id - Archive account`);
+    console.log(`   GET    /categories - Get categories for user (?type=INCOME|EXPENSE)`);
+    console.log(`   GET    /payment-methods - Get active payment methods`);
     console.log(`   GET    /transactions - Get all transactions`);
     console.log(`   POST   /transactions - Create transaction`);
     console.log(`   GET    /budgets - Get all budgets`);

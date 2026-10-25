@@ -19,18 +19,26 @@ const formatUserSummary = (row) => ({
   updatedAt: row.updated_at
 });
 
-// ✅ GET all users (Sanitized directory for frontend identifier lookup)
+// ✅ GET all users (Restricted to self for regular users to prevent user enumeration)
 const getAllUsers = async (req, res, next) => {
   try {
+    const authUserId = req.user ? parseId(req.user.user_id) : null;
+    if (!authUserId) {
+      const err = new Error('Authentication required');
+      err.statusCode = 401;
+      throw err;
+    }
+
     const result = await pool.query(`
       SELECT user_id, username, email, profile_type, created_at, updated_at
       FROM users
+      WHERE user_id = $1
       ORDER BY user_id ASC
-    `);
+    `, [authUserId]);
 
     res.json({
       success: true,
-      message: 'Users retrieved successfully',
+      message: 'User retrieved successfully',
       data: result.rows.map(formatUserSummary)
     });
   } catch (err) {
@@ -38,14 +46,21 @@ const getAllUsers = async (req, res, next) => {
   }
 };
 
-// ✅ GET user by ID (Sanitized single user profile)
+// ✅ GET user by ID (Sanitized single user profile, enforcing profile ownership)
 const getUserById = async (req, res, next) => {
   try {
     const id = parseId(req.params.id);
+    const authUserId = req.user ? parseId(req.user.user_id) : null;
 
     if (!id) {
       const err = new Error('Valid User ID is required');
       err.statusCode = 400;
+      throw err;
+    }
+
+    if (!authUserId || id !== authUserId) {
+      const err = new Error('Forbidden: You can only view your own user profile');
+      err.statusCode = authUserId ? 403 : 401;
       throw err;
     }
 

@@ -1,4 +1,4 @@
-# FinSight Backend API
+﻿# FinSight Backend API
 
 FinSight is a secure, production-grade personal finance management REST API built with Node.js, Express, and PostgreSQL. It powers account tracking, expense and income transactions, category budgeting, obligations, and financial analytics.
 

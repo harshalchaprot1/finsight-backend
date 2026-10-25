@@ -25,12 +25,16 @@ const parsePeriod = (month, year) => {
 // Dual compatibility: supports Angular ReportsService.getSummary() and dashboard metrics
 const getDashboardSummary = async (req, res, next) => {
   try {
-    const userId = req.user.user_id;
+    const userId = parseId(req.user?.user_id);
+    if (!userId) {
+      const err = new Error('Authentication required');
+      err.statusCode = 401;
+      throw err;
+    }
 
-    // Optional query param override if specified in URL, else if user_id passed in param verify it
-    if (req.params.user_id) {
+    if (req.params.user_id !== undefined) {
       const paramUserId = parseId(req.params.user_id);
-      if (paramUserId && paramUserId !== userId) {
+      if (!paramUserId || paramUserId !== userId) {
         const err = new Error('Forbidden: You cannot access financial summary of another user');
         err.statusCode = 403;
         throw err;
@@ -123,11 +127,16 @@ const getDashboardSummary = async (req, res, next) => {
 // ✅ GET monthly spending report grouped by category
 const getMonthlyReport = async (req, res, next) => {
   try {
-    const userId = req.user.user_id;
+    const userId = parseId(req.user?.user_id);
+    if (!userId) {
+      const err = new Error('Authentication required');
+      err.statusCode = 401;
+      throw err;
+    }
 
-    if (req.params.user_id) {
+    if (req.params.user_id !== undefined) {
       const requestedId = parseId(req.params.user_id);
-      if (requestedId && requestedId !== userId) {
+      if (!requestedId || requestedId !== userId) {
         const err = new Error('Forbidden: You cannot access reports for another user');
         err.statusCode = 403;
         throw err;
@@ -187,11 +196,16 @@ const getMonthlyReport = async (req, res, next) => {
 // ✅ GET annual spending report grouped by category
 const getAnnualReport = async (req, res, next) => {
   try {
-    const userId = req.user.user_id;
+    const userId = parseId(req.user?.user_id);
+    if (!userId) {
+      const err = new Error('Authentication required');
+      err.statusCode = 401;
+      throw err;
+    }
 
-    if (req.params.user_id) {
+    if (req.params.user_id !== undefined) {
       const requestedId = parseId(req.params.user_id);
-      if (requestedId && requestedId !== userId) {
+      if (!requestedId || requestedId !== userId) {
         const err = new Error('Forbidden: You cannot access reports for another user');
         err.statusCode = 403;
         throw err;
@@ -249,11 +263,16 @@ const getAnnualReport = async (req, res, next) => {
 // ✅ GET monthly spending by month across all categories (for year charts)
 const getMonthlySummary = async (req, res, next) => {
   try {
-    const userId = req.user.user_id;
+    const userId = parseId(req.user?.user_id);
+    if (!userId) {
+      const err = new Error('Authentication required');
+      err.statusCode = 401;
+      throw err;
+    }
 
-    if (req.params.user_id) {
+    if (req.params.user_id !== undefined) {
       const requestedId = parseId(req.params.user_id);
-      if (requestedId && requestedId !== userId) {
+      if (!requestedId || requestedId !== userId) {
         const err = new Error('Forbidden: You cannot access reports for another user');
         err.statusCode = 403;
         throw err;
@@ -303,11 +322,16 @@ const getMonthlySummary = async (req, res, next) => {
 // ✅ GET budget vs actual spending (using v_budget_status)
 const getBudgetVsActual = async (req, res, next) => {
   try {
-    const userId = req.user.user_id;
+    const userId = parseId(req.user?.user_id);
+    if (!userId) {
+      const err = new Error('Authentication required');
+      err.statusCode = 401;
+      throw err;
+    }
 
-    if (req.params.user_id) {
+    if (req.params.user_id !== undefined) {
       const requestedId = parseId(req.params.user_id);
-      if (requestedId && requestedId !== userId) {
+      if (!requestedId || requestedId !== userId) {
         const err = new Error('Forbidden: You cannot access reports for another user');
         err.statusCode = 403;
         throw err;

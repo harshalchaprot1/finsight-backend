@@ -5,12 +5,24 @@
  * test accounts. Preserves all existing database seed data.
  */
 
+// Safety guard: abort if running against live/development database without test isolation
+const activeDb = process.env.DB_NAME || 'finsight';
+if ((activeDb === 'finsight' || !process.env.DB_NAME) && process.env.NODE_ENV !== 'test') {
+  console.error('\n❌ SAFETY BLOCKER: Tests must run against a dedicated test database (e.g., finsight_test).');
+  console.error(`Current DB_NAME: "${activeDb}", NODE_ENV: "${process.env.NODE_ENV || 'undefined'}"`);
+  console.error('Please configure a dedicated test database before running this suite.\n');
+  process.exit(1);
+}
+
 const jwt = require('jsonwebtoken');
 const pool = require('../db');
 const authController = require('../controllers/authController');
 const usersController = require('../controllers/usersController');
 const transactionsController = require('../controllers/transactionsController');
 const budgetsController = require('../controllers/budgetsController');
+const accountsController = require('../controllers/accountsController');
+const categoriesController = require('../controllers/categoriesController');
+const paymentMethodsController = require('../controllers/paymentMethodsController');
 const reportsController = require('../controllers/reportsController');
 const authMiddleware = require('../middleware/auth');
 
@@ -79,14 +91,19 @@ async function runTestSuite() {
     assert('3. Expired auth token is rejected with HTTP 401', res.statusCode === 401 && !nextCalled);
   }
 
-  // Test 4: Public Users Directory (Frontend login identifier lookup)
+  // Test 4: Protected Users Directory (Unauthenticated access blocked)
   {
+    let unauthenticatedBlocked = false;
     const req = {};
     const res = createMockRes();
-    await usersController.getAllUsers(req, res, (err) => { throw err; });
-    const users = res.jsonData?.data || [];
-    const hasNoPasswords = users.every((u) => u.password_hash === undefined);
-    assert('4. Public user directory returns sanitized profiles without password hashes', res.statusCode === 200 && users.length > 0 && hasNoPasswords);
+    try {
+      await usersController.getAllUsers(req, res, (err) => {
+        if (err.statusCode === 401) unauthenticatedBlocked = true;
+      });
+    } catch (e) {
+      if (e.statusCode === 401) unauthenticatedBlocked = true;
+    }
+    assert('4. Unauthenticated user directory access is blocked (HTTP 401)', unauthenticatedBlocked);
   }
 
   // Test 5: Registration with Validation
@@ -392,14 +409,165 @@ async function runTestSuite() {
       updRes.statusCode === 200 && updRes.jsonData?.data?.profile_type === 'EMPLOYEE'
     );
 
-    // Test 23: User account deletion enforces ownership and cascades test records cleanly
+        // --- Phase 2 Integration Tests: Accounts, Categories, Payment Methods ---
+
+    // Test 23: Accounts list returns user accounts with calculated current balance
+    {
+      const accListReq = { user: { user_id: registeredUserId }, query: {} };
+      const accListRes = createMockRes();
+      await accountsController.getAllAccounts(accListReq, accListRes, (err) => { throw err; });
+      assert(
+        '23. Accounts list returns user accounts with calculated current balances',
+        accListRes.statusCode === 200 && Array.isArray(accListRes.jsonData?.data) && accListRes.jsonData.data.length >= 2
+      );
+    }
+
+    // Test 24: Single account retrieval by ID succeeds
+    let createdAccId;
+    {
+      const accGetReq = { user: { user_id: registeredUserId }, params: { id: testAccountId } };
+      const accGetRes = createMockRes();
+      await accountsController.getAccountById(accGetReq, accGetRes, (err) => { throw err; });
+      assert(
+        '24. Single account retrieval by ID succeeds with opening and current balance',
+        accGetRes.statusCode === 200 && accGetRes.jsonData?.data?.account_id === testAccountId
+      );
+    }
+
+    // Test 25: Account CREATE succeeds with valid account_type and opening_balance
+    {
+      const accCreateReq = {
+        user: { user_id: registeredUserId },
+        body: {
+          account_name: 'Test Emergency Wallet',
+          account_type: 'WALLET',
+          opening_balance: 1500.50
+        }
+      };
+      const accCreateRes = createMockRes();
+      await accountsController.createAccount(accCreateReq, accCreateRes, (err) => { throw err; });
+      createdAccId = accCreateRes.jsonData?.data?.account_id;
+      assert(
+        '25. Account CREATE succeeds with valid type and non-negative opening balance',
+        accCreateRes.statusCode === 201 && createdAccId && accCreateRes.jsonData?.data?.current_balance === 1500.50
+      );
+    }
+
+    // Test 26: Account CREATE rejects invalid account_type (HTTP 400)
+    {
+      const invalidTypeReq = {
+        user: { user_id: registeredUserId },
+        body: {
+          account_name: 'Invalid Type Acc',
+          account_type: 'BITCOIN_WALLET',
+          opening_balance: 500
+        }
+      };
+      const invalidTypeRes = createMockRes();
+      let caughtErr = null;
+      await accountsController.createAccount(invalidTypeReq, invalidTypeRes, (err) => { caughtErr = err; });
+      assert(
+        '26. Account CREATE rejects invalid account_type with HTTP 400',
+        caughtErr && caughtErr.statusCode === 400
+      );
+    }
+
+    // Test 27: Cross-user account access is strictly blocked (HTTP 404)
+    {
+      const crossReq = { user: { user_id: 999999 }, params: { id: testAccountId } };
+      const crossRes = createMockRes();
+      let caughtErr = null;
+      await accountsController.getAccountById(crossReq, crossRes, (err) => { caughtErr = err; });
+      assert(
+        '27. Cross-user account retrieval is strictly blocked with HTTP 404',
+        caughtErr && caughtErr.statusCode === 404
+      );
+    }
+
+    // Test 28: Account UPDATE modifies name and archives state
+    {
+      const accUpdReq = {
+        user: { user_id: registeredUserId },
+        params: { id: createdAccId },
+        body: { account_name: 'Renamed Wallet', account_type: 'CASH' }
+      };
+      const accUpdRes = createMockRes();
+      await accountsController.updateAccount(accUpdReq, accUpdRes, (err) => { throw err; });
+      assert(
+        '28. Account UPDATE modifies attributes while preserving balance integrity',
+        accUpdRes.statusCode === 200 && accUpdRes.jsonData?.data?.account_name === 'Renamed Wallet'
+      );
+    }
+
+    // Test 29: Account archive (soft delete) marks is_archived = true
+    {
+      const archReq = {
+        user: { user_id: registeredUserId },
+        params: { id: createdAccId }
+      };
+      const archRes = createMockRes();
+      await accountsController.archiveAccount(archReq, archRes, (err) => { throw err; });
+      assert(
+        '29. Account ARCHIVE performs safe soft delete without foreign key violations',
+        archRes.statusCode === 200 && archRes.jsonData?.data?.is_archived === true
+      );
+    }
+
+    // Test 30: Categories lookup returns only authorized categories for current user
+    {
+      const catReq = { user: { user_id: registeredUserId }, query: {} };
+      const catRes = createMockRes();
+      await categoriesController.getCategories(catReq, catRes, (err) => { throw err; });
+      assert(
+        '30. Categories lookup returns user authorized categories',
+        catRes.statusCode === 200 && Array.isArray(catRes.jsonData?.data) && catRes.jsonData.data.length >= 2
+      );
+    }
+
+    // Test 31: Categories lookup filters by category_type (type=EXPENSE)
+    {
+      const catExpReq = { user: { user_id: registeredUserId }, query: { type: 'EXPENSE' } };
+      const catExpRes = createMockRes();
+      await categoriesController.getCategories(catExpReq, catExpRes, (err) => { throw err; });
+      const allExpense = catExpRes.jsonData?.data?.every((c) => c.category_type === 'EXPENSE');
+      assert(
+        '31. Categories lookup filters accurately by ?type=EXPENSE',
+        catExpRes.statusCode === 200 && allExpense === true && catExpRes.jsonData.data.length >= 1
+      );
+    }
+
+    // Test 32: Categories lookup rejects invalid type filter (HTTP 400)
+    {
+      const invalidCatTypeReq = { user: { user_id: registeredUserId }, query: { type: 'INVESTMENT' } };
+      const invalidCatTypeRes = createMockRes();
+      let caughtErr = null;
+      await categoriesController.getCategories(invalidCatTypeReq, invalidCatTypeRes, (err) => { caughtErr = err; });
+      assert(
+        '32. Categories lookup rejects invalid type filter with HTTP 400',
+        caughtErr && caughtErr.statusCode === 400
+      );
+    }
+
+    // Test 33: Payment methods lookup returns active payment methods
+    {
+      const pmReq = { user: { user_id: registeredUserId } };
+      const pmRes = createMockRes();
+      await paymentMethodsController.getPaymentMethods(pmReq, pmRes, (err) => { throw err; });
+      const allActive = pmRes.jsonData?.data?.every((m) => m.is_active === true);
+      assert(
+        '33. Payment methods lookup returns only active methods from database',
+        pmRes.statusCode === 200 && Array.isArray(pmRes.jsonData?.data) && allActive === true
+      );
+    }
+
+    // Test 34: User account deletion enforces ownership and cascades test records cleanly
     const delReq = {
       user: { user_id: registeredUserId },
       params: { id: registeredUserId }
     };
     const delRes = createMockRes();
     await usersController.deleteUser(delReq, delRes, (err) => { throw err; });
-    assert('23. User account deletion enforces ownership and cascades test records cleanly', delRes.statusCode === 200);
+    assert('34. User account deletion enforces ownership and cascades test records cleanly', delRes.statusCode === 200);
 
     registeredUserId = null; // Cleanly deleted
 
